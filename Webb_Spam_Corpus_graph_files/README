@@ -1,0 +1,52 @@
+README v1.0 -- Webb Spam Corpus graph files
+-------------------------------------------
+
+This archive contains three graph files, which represent the Webb Spam Corpus
+as an internally consistent web graph:
+
+url_graph_file -- each node is represented by a unique URL.  In this file,
+every unique URL in the corpus is treated as a node in the web graph, and every
+unique link to another URL in the corpus is stored as an edge in the web graph.
+
+url_with_redirects_graph_file -- each node is represented by a unique URL, and
+redirect chains are followed to reach certain nodes.  This file is very similar
+to url_graph_file; however, this file treats links to any URL along a node's
+redirect chain the same as a direct link to the node.  For example, if node 0
+links to a URL that redirects to node 1 (as per the redirect files in the
+corpus), we treat that link the same as if node 0 points directly to node 1.
+
+host_graph_file -- each node is represented by a unique hostname.  In this
+file, every unique hostname in the corpus is treated as a node in the web
+graph, and every unique link to another hostname in the corpus is stored as an
+edge in the web graph.
+
+All three of these files contain a list of nodes and their corresponding
+neighbors, using the following format:
+
+NODE_ID[ NEIGHBOR_ID]*
+
+For example, if node 0 links to nodes 1, 2, and 3, node 0 will be described as
+follows:
+
+0 1 2 3
+
+It is also important to note that each file may contain self links.  Thus, if
+node 0 only links to itself, it will be described as follows:
+
+0 0
+
+Finally, if node 0 does not link to any other node in the corpus, it will be
+described as follows:
+
+0
+
+To map the node ids back to their corresponding URLs/hostnames, we also provide
+two mapping files:
+
+url_id_mapping -- maps ids to URLs. 
+host_id_mapping -- maps ids to hostnames.
+
+It is important to note that the ids were randomly generated.  Thus, a higher
+or lower id does not carry any intentional significance.
+
+If you have any questions, please email webb [AT] cc [DOT] gatech [DOT] edu
