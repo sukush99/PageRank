@@ -9,6 +9,9 @@ class Config(BaseSettings):
     )
     link: str
 
+    graph_path: str
+    idmap_path: str
+
 
 config = Config()
 
