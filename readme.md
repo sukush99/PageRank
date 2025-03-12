@@ -7,7 +7,6 @@ This project aims to bring relvence-based search using NL. We apply semantic lin
 
 With the help of **Graph Neural Network (GNN)**, we can learn the complex link relationships and predict the importance of nodes(website) in the graph.
 
-changed by an idiot
 
 
 
