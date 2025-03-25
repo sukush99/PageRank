@@ -37,6 +37,27 @@ def compute_pagerank(G):
 
     return sorted_pagerank
 
+from flask import Flask, request, jsonify, render_template
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return render_template("index.html")  # Loads HTML page
+
+@app.route("/search")
+def search():
+    query = request.args.get("query", "").lower()
+    
+    responses = {
+        "hello": "Hi there! How can I help?",
+        "python": "Python is great for web development!",
+        "flask": "Flask is a lightweight web framework.",
+    }
+    
+    message = responses.get(query, "Sorry, I don't understand.")
+    
+    return jsonify({"message": message})
+
 def main():
     Link = 'https://en.wikipedia.org/wiki/Python_(programming_language)'
     print(f"Link: {Link}")
@@ -55,6 +76,8 @@ def main():
     #highest 10 scoring page ids
     for node, score in sorted_by_pagerank[:10]:
         print(f"Pageid: {node}, page url: {Id_to_url[node]}, Score: {score}")
+    
+    app.run(debug=True)
 
     
 
