@@ -7,7 +7,6 @@ class Config(BaseSettings):
         env_file="settings.env",
         env_file_encoding="utf-8",
     )
-    link: str
 
     graph_path: str
     idmap_path: str

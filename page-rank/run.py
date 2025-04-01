@@ -1,5 +1,6 @@
 from config import config
 import networkx as nx
+import numpy as np
 
 def parse_edge_list(path):
     G = nx.DiGraph() # directional graph
@@ -38,11 +39,6 @@ def compute_pagerank(G):
     return sorted_pagerank
 
 def main():
-    Link = 'https://en.wikipedia.org/wiki/Python_(programming_language)'
-    print(f"Link: {Link}")
-    print(f"Link from config: {config.link}")
-
-    
 
     # Load the graph from an edge list file
     G = parse_edge_list(config.graph_path)
