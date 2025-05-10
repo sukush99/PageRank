@@ -9,6 +9,12 @@ import webbrowser
 import urllib.parse
 import urllib.request
 import shutil
+import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from bs4 import XMLParsedAsHTMLWarning
+import warnings
+from concurrent.futures import ProcessPoolExecutor
+import mmap
 
 def save_pickle(obj, filename):
     with open(filename, 'wb') as f:
@@ -80,14 +86,18 @@ def tokenize(text):
 
 def load_website_content_and_index(content_dir, url2id, graph, maxtoload):
     directory_path = Path(content_dir)
-    
+    print(directory_path)
     inverted_index = {}
     doc_freq = {}
     docs = {}  # {doc_id: [length, [linked_ids], {"url": ..., "filename": ...}]}
     total = 0
+
+    warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+
     for full_path in directory_path.iterdir():
         total += 1
-        if (total == maxtoload): return docs, inverted_index, doc_freq
+        if (total % 10000) == 0: print(f"total documents read: {total}")
+        if (total == maxtoload): break
         try:
             with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
                 raw = f.read()
@@ -103,9 +113,13 @@ def load_website_content_and_index(content_dir, url2id, graph, maxtoload):
         doc_id = url2id.get(original_url)
         if doc_id is None:
             continue
-
-        soup = BeautifulSoup(raw, 'html.parser')
-        text = soup.get_text(separator=' ')
+        
+        try:
+            soup = BeautifulSoup(raw, 'html.parser')
+            text = soup.get_text(separator=' ')
+        except e:
+            continue
+        
         tokens = [t for t in re.findall(r"\w+", text.lower()) if t not in STOPWORDS]
         doc_len = len(tokens)
 
@@ -124,13 +138,117 @@ def load_website_content_and_index(content_dir, url2id, graph, maxtoload):
         docs[doc_id] = [
             doc_len,
             linked_ids,
-            {"url": original_url, "filename": str(full_path.name)}
+            {"url": original_url, "filename": str(full_path.name), "pagerank_score": 0}
         ]
+
+    pagerank_scores = compute_pagerank(graph)
+
+    for doc_id, score in pagerank_scores.items():
+        if doc_id in docs:
+            docs[doc_id][2]["pagerank_score"] = score    
 
     return docs, inverted_index, doc_freq
 
 
-def compute_bm25(query, inv_index, doc_freq, docs, k1=1.5, b=0.75):
+
+def load_website_content_and_index_fast(
+    content_dir, url2id, graph, maxtoload, workers=4, report_every=10000
+):
+    inverted_index = {}
+    doc_freq      = {}
+    docs          = {}
+
+    warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+    STOPWORDScache = STOPWORDS
+    def process_entry(entry_path):
+        try:
+            raw = open(entry_path, 'r', encoding='utf-8', errors='ignore').read()
+        except Exception:
+            return None
+
+        m = re.search(r"<!--\s*URL:\s*(https?://\S+)\s*-->", raw)
+        if not m:
+            return None
+
+        url = m.group(1)
+        doc_id = url2id.get(url)
+        if doc_id is None:
+            return None
+        try:
+            soup = BeautifulSoup(raw, 'html.parser')
+            text = soup.get_text(" ")
+        except:
+            text = ""
+
+        tokens = [t for t in re.findall(r"\w+", text.lower()) if t not in STOPWORDScache]
+        if not tokens:
+            return None
+
+        # Build local term counts + df
+        local_index    = {}
+        for t in tokens:
+            local_index[t] = local_index.get(t, 0) + 1
+        local_doc_freq = {t: 1 for t in set(tokens)}
+
+        linked_ids = graph.get(doc_id, [])
+        meta = {"url": url, "filename": os.path.basename(entry_path), "pagerank_score": 0}
+        return (doc_id, len(tokens), local_index, local_doc_freq, linked_ids, meta)
+
+    # 1) Collect up to maxtoload file paths
+    file_paths = []
+    for entry in os.scandir(content_dir):
+        if entry.is_file():
+            file_paths.append(entry.path)
+            if len(file_paths) >= maxtoload:
+                break
+
+    print(f"Found {len(file_paths)} files for processing.")
+    save_every = 100000
+    output_prefix = "savingforcrash"
+
+    # 2) Process in parallel without storing huge future lists
+    with ThreadPoolExecutor(max_workers=workers) as exe:
+        for i, result in enumerate(exe.map(process_entry, file_paths), 1):
+            if i % report_every == 0:
+                print(f"Processed {i} documents...")
+            
+            if i % save_every == 0:
+                
+                print(f"Saving intermediate structures at {i} documents...")
+                save_pickle(docs, f"{output_prefix}docs_{i}.pkl")
+                save_pickle(inverted_index, f"{output_prefix}inverted_index_{i}.pkl")
+                save_pickle(doc_freq, f"{output_prefix}doc_freq_{i}.pkl")
+            if result is None:
+                continue
+            doc_id, doc_len, loc_idx, loc_df, linked, meta = result
+
+            # Merge inverted index
+            for term, cnt in loc_idx.items():
+                if term not in inverted_index:
+                    inverted_index[term] = {}
+                if doc_id not in inverted_index[term]:
+                    inverted_index[term][doc_id] = 0
+                inverted_index[term][doc_id] += cnt
+
+            # Merge document frequency
+            for term in loc_df:
+                if term not in doc_freq:
+                    doc_freq[term] = 0
+                doc_freq[term] += 1
+
+            docs[doc_id] = [doc_len, linked, meta]
+
+    # 3) Compute PageRank once, then attach
+    pagerank_scores = compute_pagerank(graph)
+    for doc_id, score in pagerank_scores.items():
+        if doc_id in docs:
+            docs[doc_id][2]["pagerank_score"] = score
+
+    return docs, inverted_index, doc_freq
+
+
+
+def compute_bm25_pagerank_search(query, inv_index, doc_freq, docs, k1=1.5, b=0.75, pagerank_weight=0.2):
     """
     Compute BM25 scores for a query.
     Returns: dict[doc_id] = score
@@ -156,18 +274,69 @@ def compute_bm25(query, inv_index, doc_freq, docs, k1=1.5, b=0.75):
             score = idf * ((tf * (k1 + 1)) / denom)
             scores[doc_id] = scores.get(doc_id, 0) + score
 
-    # Sort by descending score
+    max_bm25 = max(scores.values())
+    # normalise and combine bm25 and pagerank
+    max_pr = max(docs[doc_id][2]['pagerank_score'] for doc_id in scores if 'pagerank_score' in docs[doc_id][2])
+    for doc_id in scores:
+        norm_bm25 = scores[doc_id] / max_bm25 if max_bm25 > 0 else 0
+        norm_pr = docs[doc_id][2].get('pagerank_score', 0) / max_pr if max_pr > 0 else 0
+        scores[doc_id] = (1 - pagerank_weight) * norm_bm25 + pagerank_weight * norm_pr
+
     return dict(sorted(scores.items(), key=lambda x: x[1], reverse=True))
+
+def build_reverse_graph(graph):
+    reverse_graph = {node: [] for node in graph}
+    for src, outlinks in graph.items():
+        for dst in outlinks:
+            if dst in reverse_graph:
+                reverse_graph[dst].append(src)
+    return reverse_graph
+
+def compute_pagerank(graph, damping=0.85, max_iter=20, tol=1.0e-6):
+    N = len(graph)
+    pr = {node: 1.0 / N for node in graph}
+    print("building reverse graph")
+    reverse_graph = build_reverse_graph(graph)
+
+    for _ in range(max_iter):
+        new_pr = {}
+        for node in graph:
+            rank_sum = 0.0
+            for incoming in reverse_graph.get(node, []):
+                out_deg = len(graph[incoming])
+                if out_deg > 0:
+                    rank_sum += pr[incoming] / out_deg
+            new_pr[node] = (1 - damping) / N + damping * rank_sum
+
+        delta = sum(abs(new_pr[n] - pr[n]) for n in pr)
+        pr = new_pr
+        if delta < tol:
+            break
+
+    return pr
 
 def interactive_search(docs, inv_index, doc_freq, base_path):
     print("Enter a search query to see top BM25 results, or enter a document ID to view the local webpage.")
+    print("Type 'pagerankweight n' to set the pagerank weight in the search, where n is a float from 0 to 1")
     print("Type 'exit' to quit.\n")
-    
+    pagerank_weight=0.2
     while True:
         user_input = input("Query or Document ID: ").strip()
         
         if user_input.lower() == "exit":
             break
+        
+        if user_input.lower().startswith("pagerankweight "):
+            try:
+                new_weight = float(user_input.split()[1])
+                if 0 <= new_weight <= 1:
+                    pagerank_weight = new_weight
+                    print(f"PageRank weight set to {pagerank_weight}, higher means pagerank has more impact")
+                else:
+                    print("Weight must be between 0 and 1.")
+            except (IndexError, ValueError):
+                print("Invalid format. Use: weight 0.3")
+            continue
 
         if user_input.isdigit():
             doc_id = int(user_input)
@@ -178,7 +347,7 @@ def interactive_search(docs, inv_index, doc_freq, base_path):
             else:
                 print(f"Document ID {doc_id} not found.")
         else:
-            results = compute_bm25(user_input, inv_index, doc_freq, docs)
+            results = compute_bm25_pagerank_search(user_input, inv_index, doc_freq, docs,pagerank_weight)
             if not results:
                 print("No results found.")
                 continue
@@ -186,23 +355,37 @@ def interactive_search(docs, inv_index, doc_freq, base_path):
             print(f"\nTop results for: '{user_input}'")
             for doc_id, score in list(results.items())[:10]:
                 meta = docs[doc_id][2]
-                print(f"[{doc_id}] {meta['url']} - Score: {score:.4f}")
+                print(f"[{doc_id}] {meta['url']} - BM25+pagerank weighted at: {pagerank_weight} Score: {score:.4f}")
             print()
 
 def main():
-    print("Loading ID mapping...")
-    url2id = load_id_to_url_mapping("../Webb_Spam_Corpus_graph_files/url_id_mapping")
 
-    print("Loading graph...")
-    graph = load_links("../Webb_Spam_Corpus_graph_files/url_with_redirects_graph_file")
+    parser = argparse.ArgumentParser(description="WebbSpamCorpus BM25 Indexer")
+    parser.add_argument('--load-pickle', action='store_true', help='Load data from pickle files instead of rebuilding.')
+    args = parser.parse_args()
 
-    print("Loading documents...")
-    docs, inv_index, doc_freq = load_website_content_and_index(CONTENT_PATH, url2id, graph, 1000)
-    print(f"Loaded {len(docs)} documents.")
+    if args.load_pickle:
+        prefix = "savingforcrash"
+        postfix = "_300000"
+        print("Loading search acceleration structures from pickle files...")
+        docs = load_pickle(prefix + "docs" + postfix + ".pkl")
+        inv_index = load_pickle(prefix + "inverted_index" + postfix + ".pkl" )
+        doc_freq = load_pickle(prefix + "doc_freq" + postfix + ".pkl" )
+    else:
+        print("Loading ID mapping...")
+        url2id = load_id_to_url_mapping("../Webb_Spam_Corpus_graph_files/url_id_mapping")
 
-    save_pickle(docs, "docs.pkl")
-    save_pickle(inv_index, "inverted_index.pkl")
-    save_pickle(doc_freq, "doc_freq.pkl")
+        print("Loading graph...")
+        graph = load_links("../Webb_Spam_Corpus_graph_files/url_with_redirects_graph_file")
+
+        print("Loading documents...")
+        docs, inv_index, doc_freq = load_website_content_and_index_fast(CONTENT_PATH, url2id, graph, 800000)
+        print(f"Loaded {len(docs)} documents.")
+
+        print("Saving search acceleration structures...")
+        save_pickle(docs, "docs.pkl")
+        save_pickle(inv_index, "inverted_index.pkl")
+        save_pickle(doc_freq, "doc_freq.pkl")
 
 
     interactive_search(docs, inv_index, doc_freq, CONTENT_PATH)
