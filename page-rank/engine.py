@@ -84,82 +84,22 @@ def tokenize(text):
     return [t for t in tokens if t not in STOPWORDS]
 
 
-def load_website_content_and_index(content_dir, url2id, graph, maxtoload):
-    directory_path = Path(content_dir)
-    print(directory_path)
-    inverted_index = {}
-    doc_freq = {}
-    docs = {}  # {doc_id: [length, [linked_ids], {"url": ..., "filename": ...}]}
-    total = 0
-
-    warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
-
-    for full_path in directory_path.iterdir():
-        total += 1
-        if (total % 10000) == 0: print(f"total documents read: {total}")
-        if (total == maxtoload): break
-        try:
-            with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
-                raw = f.read()
-        except Exception as e:
-            print(f"Error reading {full_path}: {e}")
-            continue
-
-        match = re.search(r"<!--\s*URL:\s*(https?://\S+)\s*-->", raw)
-        if not match:
-            continue
-
-        original_url = match.group(1)
-        doc_id = url2id.get(original_url)
-        if doc_id is None:
-            continue
-        
-        try:
-            soup = BeautifulSoup(raw, 'html.parser')
-            text = soup.get_text(separator=' ')
-        except e:
-            continue
-        
-        tokens = [t for t in re.findall(r"\w+", text.lower()) if t not in STOPWORDS]
-        doc_len = len(tokens)
-
-        for term in tokens:
-            if term not in inverted_index:
-                inverted_index[term] = {}
-            if doc_id not in inverted_index[term]:
-                inverted_index[term][doc_id] = 0
-            inverted_index[term][doc_id] += 1
-
-        for term in set(tokens):
-            doc_freq[term] = doc_freq.get(term, 0) + 1
-
-        linked_ids = graph.get(doc_id, [])
-
-        docs[doc_id] = [
-            doc_len,
-            linked_ids,
-            {"url": original_url, "filename": str(full_path.name), "pagerank_score": 0}
-        ]
-
-    pagerank_scores = compute_pagerank(graph)
-
-    for doc_id, score in pagerank_scores.items():
-        if doc_id in docs:
-            docs[doc_id][2]["pagerank_score"] = score    
-
-    return docs, inverted_index, doc_freq
-
-
-
 def load_website_content_and_index_fast(
-    content_dir, url2id, graph, maxtoload, workers=4, report_every=10000
+    content_dir, url2id, graph, maxtoload, workers=4,
+    report_every=10000, save_every=100000, output_prefix="savingforcrash",
+    resume=0
 ):
+    """
+    Fast loader with checkpoint/resume support.
+    resume: number of documents already processed and saved in checkpoint.
+    """
     inverted_index = {}
     doc_freq      = {}
     docs          = {}
 
     warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
     STOPWORDScache = STOPWORDS
+
     def process_entry(entry_path):
         try:
             raw = open(entry_path, 'r', encoding='utf-8', errors='ignore').read()
@@ -184,7 +124,6 @@ def load_website_content_and_index_fast(
         if not tokens:
             return None
 
-        # Build local term counts + df
         local_index    = {}
         for t in tokens:
             local_index[t] = local_index.get(t, 0) + 1
@@ -194,7 +133,7 @@ def load_website_content_and_index_fast(
         meta = {"url": url, "filename": os.path.basename(entry_path), "pagerank_score": 0}
         return (doc_id, len(tokens), local_index, local_doc_freq, linked_ids, meta)
 
-    # 1) Collect up to maxtoload file paths
+    # 1) Collect file paths
     file_paths = []
     for entry in os.scandir(content_dir):
         if entry.is_file():
@@ -202,43 +141,41 @@ def load_website_content_and_index_fast(
             if len(file_paths) >= maxtoload:
                 break
 
-    print(f"Found {len(file_paths)} files for processing.")
-    save_every = 100000
-    output_prefix = "savingforcrash"
+    print(f"Found {len(file_paths)} files for processing. Resuming at {resume}.")
+    # 2) Optionally load resume checkpoint
+    if resume > 0:
+        docs = load_pickle(f"{output_prefix}docs_{resume}.pkl")
+        inverted_index = load_pickle(f"{output_prefix}inverted_index_{resume}.pkl")
+        doc_freq = load_pickle(f"{output_prefix}doc_freq_{resume}.pkl")
+        print(f"Loaded checkpoint at {resume} documents.")
 
-    # 2) Process in parallel without storing huge future lists
+    file_paths_to_process = file_paths[resume:]
+
+    # 3) Process remaining in parallel
     with ThreadPoolExecutor(max_workers=workers) as exe:
-        for i, result in enumerate(exe.map(process_entry, file_paths), 1):
-            if i % report_every == 0:
-                print(f"Processed {i} documents...")
-            
-            if i % save_every == 0:
-                
-                print(f"Saving intermediate structures at {i} documents...")
-                save_pickle(docs, f"{output_prefix}docs_{i}.pkl")
-                save_pickle(inverted_index, f"{output_prefix}inverted_index_{i}.pkl")
-                save_pickle(doc_freq, f"{output_prefix}doc_freq_{i}.pkl")
+        for local_idx, result in enumerate(exe.map(process_entry, file_paths_to_process), 1):
+            global_i = resume + local_idx
+            if global_i % report_every == 0:
+                print(f"Processed {global_i} documents...")
+            if global_i % save_every == 0:
+                print(f"Saving intermediate structures at {global_i} documents...")
+                save_pickle(docs, f"{output_prefix}docs_{global_i}.pkl")
+                save_pickle(inverted_index, f"{output_prefix}inverted_index_{global_i}.pkl")
+                save_pickle(doc_freq, f"{output_prefix}doc_freq_{global_i}.pkl")
             if result is None:
                 continue
             doc_id, doc_len, loc_idx, loc_df, linked, meta = result
-
             # Merge inverted index
             for term, cnt in loc_idx.items():
                 if term not in inverted_index:
                     inverted_index[term] = {}
-                if doc_id not in inverted_index[term]:
-                    inverted_index[term][doc_id] = 0
-                inverted_index[term][doc_id] += cnt
-
-            # Merge document frequency
+                inverted_index[term][doc_id] = inverted_index[term].get(doc_id, 0) + cnt
+            # Merge doc freq
             for term in loc_df:
-                if term not in doc_freq:
-                    doc_freq[term] = 0
-                doc_freq[term] += 1
-
+                doc_freq[term] = doc_freq.get(term, 0) + 1
             docs[doc_id] = [doc_len, linked, meta]
 
-    # 3) Compute PageRank once, then attach
+    # 4) Compute PageRank and attach
     pagerank_scores = compute_pagerank(graph)
     for doc_id, score in pagerank_scores.items():
         if doc_id in docs:
@@ -359,18 +296,16 @@ def interactive_search(docs, inv_index, doc_freq, base_path):
             print()
 
 def main():
-
-    parser = argparse.ArgumentParser(description="WebbSpamCorpus BM25 Indexer")
-    parser.add_argument('--load-pickle', action='store_true', help='Load data from pickle files instead of rebuilding.')
+    parser = argparse.ArgumentParser(description="WebbSpamCorpus BM25 Indexer with resume")
+    parser.add_argument('--load-pickle', action='store_true', help='Load data from final pickle files instead of rebuilding.')
+    parser.add_argument('--resume', type=int, default=0, help='Resume processing from a checkpoint at given document count')
     args = parser.parse_args()
 
     if args.load_pickle:
-        prefix = "savingforcrash"
-        postfix = "_300000"
-        print("Loading search acceleration structures from pickle files...")
-        docs = load_pickle(prefix + "docs" + postfix + ".pkl")
-        inv_index = load_pickle(prefix + "inverted_index" + postfix + ".pkl" )
-        doc_freq = load_pickle(prefix + "doc_freq" + postfix + ".pkl" )
+        print("Loading search acceleration structures from final pickle files...")
+        docs = load_pickle("docs.pkl")
+        inv_index = load_pickle("inverted_index.pkl")
+        doc_freq = load_pickle("doc_freq.pkl")
     else:
         print("Loading ID mapping...")
         url2id = load_id_to_url_mapping("../Webb_Spam_Corpus_graph_files/url_id_mapping")
@@ -378,15 +313,19 @@ def main():
         print("Loading graph...")
         graph = load_links("../Webb_Spam_Corpus_graph_files/url_with_redirects_graph_file")
 
-        print("Loading documents...")
-        docs, inv_index, doc_freq = load_website_content_and_index_fast(CONTENT_PATH, url2id, graph, 800000)
+        print("Loading documents... This may take a while.")
+        docs, inv_index, doc_freq = load_website_content_and_index_fast(
+            CONTENT_PATH, url2id, graph, 800000,
+            workers=4, report_every=10000, save_every=100000,
+            output_prefix="savingforcrash", resume=args.resume
+        )
         print(f"Loaded {len(docs)} documents.")
 
-        print("Saving search acceleration structures...")
+
+        print("Saving final structures...")
         save_pickle(docs, "docs.pkl")
         save_pickle(inv_index, "inverted_index.pkl")
         save_pickle(doc_freq, "doc_freq.pkl")
-
 
     interactive_search(docs, inv_index, doc_freq, CONTENT_PATH)
 
