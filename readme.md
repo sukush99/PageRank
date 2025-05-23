@@ -1,13 +1,20 @@
-##Implementing PageRank with AI 
+### Hybrid Search Engine Ranking
 
-Traditional PageRank primarily relies on the quantity and structure of links, not the meaning or context of thoes links.
-It can be manipulated by link farms and other spam techniques. 
+This project illustrates the implementation of a search engine that combines a content-based ranking algorithm (BM25) and link-based authority scoring (PageRank).
+Overview
 
-This project aims to bring relvence-based search using NL. We apply semantic link analysis to understand the relationship between linked pages.
+For this project, we've leveraged the WebbSpamCorpus dataset to demonstrate how a search engine based on these two algorithms efficiently indexes web page content and constructs the underlying link relation between the pages.
+#### BM25
 
-With the help of **Graph Neural Network (GNN)**, we can learn the complex link relationships and predict the importance of nodes(website) in the graph.
+The BM25 algorithm elevates web page importance based on:
 
-changed by an idiot
+    Term frequency
+    Inverse document frequency
+    Document length normalization
 
+#### PageRank
 
+The PageRank algorithm iteratively calculates the global page importance.
+Combined Scoring
 
+The **normalized scores** of these two algorithms, including a user-adjusted weight factor, can produce relevant results to a user.
